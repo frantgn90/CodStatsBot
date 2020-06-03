@@ -29,9 +29,9 @@ class CodStatusBot(object):
         self.bot_command_fn = {
                 fn_name.replace("_CodStatusBot__cmd_", ""): getattr(self, fn_name)
                 for fn_name in dir(self) if fn_name.startswith("_CodStatusBot__cmd_") }
-        #if updates_webhook is not None and not self._is_webhook_registered():
-        #    self._register_webhook(updates_webhook)
-        #self.cod_stats = CodStats(cod_user, cod_pwd)
+        if updates_webhook is not None and not self._is_webhook_registered():
+            self._register_webhook(updates_webhook)
+        self.cod_stats = CodStats(cod_user, cod_pwd)
 
     def updates_polling(self, timeout_s: int = 1):
         """
