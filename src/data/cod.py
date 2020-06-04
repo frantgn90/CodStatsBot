@@ -2,6 +2,8 @@ import requests
 import json
 import re
 
+from typing import List
+
 class CodStats(object):
     def __init__(self, user, password):
         self.user = user
@@ -23,6 +25,15 @@ class CodStats(object):
         if r.status_code != 200:
             raise Exception(f"Error communicating with the API: {r.text}")
         return json.loads(r.text)
+
+    def get_feed(self, from_epoch: int) -> List[dict]:
+        endpoint = "https://my.callofduty.com/api/papi-client/userfeed/v1/friendFeed/"
+        r = self.session.get(endpoint)
+        if r.status_code != 200:
+            raise Exception(f"Error communicating with the API: {r.text}")
+        jr = json.loads(r.text)
+        return [event for event in jr["data"]["events"] if event["date"] > from_epoch]
+
 
     def _get_csrf_token(self):
         """
