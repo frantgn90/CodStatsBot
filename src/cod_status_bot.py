@@ -22,11 +22,6 @@ class CodStatusBot(object):
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.me = self._get_me()
-        
-        # This attempts against the multitenant capabilities. To allow multitenant, we would need
-        # to do an important refactor
-        self._last_epoch = time.time()*1000  # we need ms
-        self._receive_feeds_in_chat_id = None
 
         # All methods that handles the bot_commands. These methods are gonna be called
         # Automatically, you just need to name it in the next manner:
@@ -34,11 +29,14 @@ class CodStatusBot(object):
         self.bot_command_fn = {
                 fn_name.replace("_CodStatusBot__cmd_", ""): getattr(self, fn_name)
                 for fn_name in dir(self) if fn_name.startswith("_CodStatusBot__cmd_") }
-        # TODO I would like to have also a list of funtions to be called on every iteration
-        # of the main look, i.e. all those functions that starts with __loop_<..>
-        # Additionally, every function needs to have a particular period between calls. I've
-        # encountered that if we requests to the COD API every 3 secods or so, it is gonna
-        # log out
+
+        # All methods that should be called in the main loop.
+        # Additionally this class provides the dictionary self.last_time and self.receive_feeds_in_chat_id
+        self.bot_loop_fn = {
+                fn_name.replace("_CodStatusBot__loop_", ""): getattr(self, fn_name)
+                for fn_name in dir(self) if fn_name.startswith("_CodStatusBot__loop_") }
+        self.last_time = {fn_name: 0 for fn_name in self.bot_loop_fn.keys()}
+        self.receive_feeds_in_chat_id = {fn_name: None for fn_name in self.bot_loop_fn.keys()}
 
         if updates_webhook is not None and not self._is_webhook_registered():
             self._register_webhook(updates_webhook)
@@ -49,17 +47,15 @@ class CodStatusBot(object):
         Checks for updates every certain time set by `period_ms`.
 
         :param timeout_s: Seconds before the long polling timeout
-
         :raise Exception: Whether there is a problem communicating with the
          Telegram API
         """
-        endpoint = f"{self.base_url}/getUpdates"
-        headers = {"content-type": "application/json"}
-        payload = {"timeout": timeout_s, "offset": self._update_offset}
         while True:
-            payload["offset"] = self._update_offset
-            response = self._call_endpoint("getUpdates", "POST", headers, payload)
-
+            response = self._call_endpoint(
+                    "getUpdates", 
+                    "POST", 
+                    {"content-type": "application/json"}, 
+                    {"timeout": timeout_s, "offset": self._update_offset})
             for update in response["result"]:
                 self._process_update(update)
                 if update["update_id"]+1 > self._update_offset:
@@ -68,10 +64,15 @@ class CodStatusBot(object):
             time.sleep(timeout_s)
 
     def _process_loop(self):
-        # TODO we should have a list of __loop_<name> functions. These are gonna be all the functions that
-        # should be called in the main loop
-        if self._receive_feeds_in_chat_id is not None:
-            self.__loop_update_feeds()
+        """
+        Calls all the actions that must be performed continuously every
+        certain ammount of time. e.g. some polling on an endpoint
+        """
+        for fn_name, fn in self.bot_loop_fn.items():
+            if self.receive_feeds_in_chat_id[fn_name] is not None:
+                r = fn(self.last_time[fn_name], self.receive_feeds_in_chat_id[fn_name])
+                if r:
+                    self.last_time[fn_name] = time.time()
 
     def _process_update(self, update: dict):
         """
@@ -97,8 +98,13 @@ class CodStatusBot(object):
         if bot_command == "":
             return
 
-        # This gonna divert the call to the correct __cmd_<command> function
-        self.bot_command_fn.get(bot_command, self.bot_command_fn["default"])(bot_command_args, update)
+        # This gonna divert the call to the correct __cmd_<command> or __metacmd_<loop> function
+        if bot_command in self.bot_command_fn:
+            self.bot_command_fn.get(bot_command)(bot_command_args, update)
+        elif bot_command.startswith("activate_") and bot_command.replace("activate_") in self.bot_loop_fn:
+            self.__metacmd_activate_loop(bot_command.replace("activate_"), update)
+        else:
+            self.bot_command_fn["default"](bot_command_args, update)
 
     def _get_me(self) -> dict:
         """
@@ -165,6 +171,13 @@ class CodStatusBot(object):
             raise Exception("Error communicating with the server")
         return jr
 
+    def __cmd_default(self, args: list, update: dict):
+        """
+        The default bot_command handler. DO NOT REMOVE THIS
+        """
+        chat_id = update["message"]["chat"]["id"]
+        self._send_message(chat_id, "Don't know what you say. Take off the cock from your mouth")
+
     def __cmd_start(self, args: list, update: dict):
         """
         Telegram is used to send `/start` whenever a bot is added into a group.
@@ -204,27 +217,40 @@ class CodStatusBot(object):
         except Exception:
             self._send_message(chat_id, f"Error getting info from the player {player_name}... :(")
 
-    def __cmd_receive_feeds(self, args: list, update: dict):
+    def __cmd_help(self, args: list, update: dict):
+        feeds_cmds = "\n".join([f"- /activate_{fn_name} <yes|no>" for fn_name in self.bot_loop_fn])
+        chat_id = update["message"]["chat"]["id"]
+        self._send_message(chat_id, f"List of commands for this noice bot\n"\
+                                    f"- /start\n"\
+                                    f"- /cod_level <user> <platform>\n"\
+                                    f"{feeds_cmds}")
+
+    def __metacmd_activate_loop(self, loop_feed_name, update):
         chat_id = update["message"]["chat"]["id"]
         if len(args) != 1:
-            self._send_message(chat_id, "Usage: /receive_feeds [yes|no]")
+            self._send_message(chat_id, f"Usage: /{loop_feed_name} [yes|no]")
             return
         if args[0] == "yes":
-            self._receive_feeds_in_chat_id = chat_id
-            self._send_message(chat_id, "Congrats! Feeds updates has been activated successfully")
+            self.receive_feeds_in_chat_id[loop_feed_name] = chat_id
+            self._send_message(chat_id, f"Congrats! {loop_feed_name} activated")
         else:
-            self._receive_feeds_in_chat_id = None
-            self._send_message(chat_id, "Feeds updates has been deactivated successfully")
+            self.receive_feeds_in_chat_id[loop_feed_name] = None
+            self._send_message(chat_id, f"{loop_feed_name} has been deactivated successfully")
 
-    def __cmd_default(self, args: list, update: dict):
+    def __loop_activity_feeds(self, last_time: int, chat_id: int) -> bool:
         """
-        The default bot_command handler. DO NOT REMOVE THIS
-        """
-        chat_id = update["message"]["chat"]["id"]
-        self._send_message(chat_id, "Don't know what you say. Take off the cock from your mouth")
+        Checks whether there is a new message in the update activity feed. If yes,
+        it sends a new message to the chat with chat_id id
 
-    def __loop_update_feeds(self):
+        :param last_time: This is the last time the function was executed
+        :param chat_id: Is the chat_id of the chat where to send the messages
+
+        :return: False whether the execution was skiped, True otherwise
+        """
+        if time.time() - last_time < 180:  # 3 minutes
+            return False
         feeds = self.cod_stats.get_feed(self._last_epoch)
         for feed in feeds:
-            self._send_message(self._receive_feeds_in_chat_id, f"New activity: {feed['username']} -> {feed['category']}")
+            self._send_message(chat_id, f"New activity: {feed['username']} -> {feed['category']}")
             self._last_epoch = feed["date"]
+        return True
