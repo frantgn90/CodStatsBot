@@ -2,6 +2,7 @@ import requests
 import time
 import json
 import os
+import urllib
 
 from src.data.cod import CodStats
 
@@ -225,7 +226,7 @@ class CodStatusBot(object):
         if len(args) != 2:
             self._send_message(chat_id, "Usage: /cod_level <player> <platform>")
             return
-        player_name = args[0]
+        player_name = urllib.parse.quote(args[0])
         player_platform = args[1]
         self._send_message(chat_id, f"Getting information from player {player_name}...")
         try:
