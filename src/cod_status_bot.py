@@ -5,10 +5,13 @@ import os
 
 from src.data.cod import CodStats
 
+
 class CodStatusBot(object):
     _update_offset = 0
 
-    def __init__(self, token: str, cod_user: str, cod_pwd: str, updates_webhook: str = None):
+    def __init__(
+        self, token: str, cod_user: str, cod_pwd: str, updates_webhook: str = None
+    ):
         """
         Initialize the communications with the Telegram Bot API 
         (https://core.telegram.org/bots/api).
@@ -18,7 +21,7 @@ class CodStatusBot(object):
         :param cod_user: The user that is gonna be used for the login in the COD platform
         :param cod_pwd: The password that is gonna be used for the login in the COD platform
         """
-        self.session = requests.Session() # This is not strictly necessary
+        self.session = requests.Session()  # This is not strictly necessary
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.me = self._get_me()
@@ -27,16 +30,24 @@ class CodStatusBot(object):
         # Automatically, you just need to name it in the next manner:
         #   __cmd_<command_text>
         self.bot_command_fn = {
-                fn_name.replace("_CodStatusBot__cmd_", ""): getattr(self, fn_name)
-                for fn_name in dir(self) if fn_name.startswith("_CodStatusBot__cmd_") }
+            fn_name.replace("_CodStatusBot__cmd_", ""): getattr(self, fn_name)
+            for fn_name in dir(self)
+            if fn_name.startswith("_CodStatusBot__cmd_")
+        }
 
         # All methods that should be called in the main loop.
         # Additionally this class provides the dictionary self.last_time and self.receive_feeds_in_chat_id
         self.bot_loop_fn = {
-                fn_name.replace("_CodStatusBot__loop_", ""): getattr(self, fn_name)
-                for fn_name in dir(self) if fn_name.startswith("_CodStatusBot__loop_") }
-        self.last_time = {fn_name: 0 for fn_name in self.bot_loop_fn.keys()}
-        self.receive_feeds_in_chat_id = {fn_name: None for fn_name in self.bot_loop_fn.keys()}
+            fn_name.replace("_CodStatusBot__loop_", ""): getattr(self, fn_name)
+            for fn_name in dir(self)
+            if fn_name.startswith("_CodStatusBot__loop_")
+        }
+        self.last_time = {
+            fn_name: int(time.time() * 1000) for fn_name in self.bot_loop_fn.keys()
+        }
+        self.receive_feeds_in_chat_id = {
+            fn_name: None for fn_name in self.bot_loop_fn.keys()
+        }
 
         if updates_webhook is not None and not self._is_webhook_registered():
             self._register_webhook(updates_webhook)
@@ -52,14 +63,15 @@ class CodStatusBot(object):
         """
         while True:
             response = self._call_endpoint(
-                    "getUpdates", 
-                    "POST", 
-                    {"content-type": "application/json"}, 
-                    {"timeout": timeout_s, "offset": self._update_offset})
+                "getUpdates",
+                "POST",
+                {"content-type": "application/json"},
+                {"timeout": timeout_s, "offset": self._update_offset},
+            )
             for update in response["result"]:
                 self._process_update(update)
-                if update["update_id"]+1 > self._update_offset:
-                    self._update_offset = update["update_id"]+1
+                if update["update_id"] + 1 > self._update_offset:
+                    self._update_offset = update["update_id"] + 1
             self._process_loop()
             time.sleep(timeout_s)
 
@@ -72,7 +84,7 @@ class CodStatusBot(object):
             if self.receive_feeds_in_chat_id[fn_name] is not None:
                 r = fn(self.last_time[fn_name], self.receive_feeds_in_chat_id[fn_name])
                 if r:
-                    self.last_time[fn_name] = time.time()
+                    self.last_time[fn_name] = int(time.time() * 1000)
 
     def _process_update(self, update: dict):
         """
@@ -94,15 +106,20 @@ class CodStatusBot(object):
                 entity_to = entity_from + entity["length"]
                 # Removing the first `/`
                 bot_command = update["message"]["text"][entity_from:entity_to][1:]
-                bot_command_args = update["message"]["text"][entity_to+1:].split(" ")
+                bot_command_args = update["message"]["text"][entity_to + 1 :].split(" ")
         if bot_command == "":
             return
 
         # This gonna divert the call to the correct __cmd_<command> or __metacmd_<loop> function
         if bot_command in self.bot_command_fn:
             self.bot_command_fn.get(bot_command)(bot_command_args, update)
-        elif bot_command.startswith("activate_") and bot_command.replace("activate_") in self.bot_loop_fn:
-            self.__metacmd_activate_loop(bot_command.replace("activate_"), update)
+        elif (
+            bot_command.startswith("activate_")
+            and bot_command.replace("activate_", "") in self.bot_loop_fn
+        ):
+            self.__metacmd_activate_loop(
+                bot_command_args, bot_command.replace("activate_", ""), update
+            )
         else:
             self.bot_command_fn["default"](bot_command_args, update)
 
@@ -114,7 +131,7 @@ class CodStatusBot(object):
          is specified here https://core.telegram.org/bots/api#user
         """
         return self._call_endpoint("getWebhookInfo", "GET")
-        
+
     def _send_message(self, chat_id: str, text: str):
         """
         Send the `text` message to the chat with id `chat_id`
@@ -148,7 +165,9 @@ class CodStatusBot(object):
         payload = {"url": webhook}
         self._call_endpoint("setWebhook", "POST", headers, payload)
 
-    def _call_endpoint(self, endpoint: str, verb: str, headers: dict={}, payload: dict={}) -> dict:
+    def _call_endpoint(
+        self, endpoint: str, verb: str, headers: dict = {}, payload: dict = {}
+    ) -> dict:
         """
         Call to the endpoint and return the result
 
@@ -161,12 +180,14 @@ class CodStatusBot(object):
         :return: The result of the request
         """
         requester = self.session.post if verb == "POST" else self.session.get
-        r = requester(f"{self.base_url}/{endpoint}", 
-                headers = headers, 
-                data = json.dumps(payload))
+        r = requester(
+            f"{self.base_url}/{endpoint}", headers=headers, data=json.dumps(payload)
+        )
         jr = json.loads(r.text)
         if "ok" in jr and jr["ok"] != True:
-            raise Exception(f"Error processing the request to {endpoint} ERROR={jr['description']}")
+            raise Exception(
+                f"Error processing the request to {endpoint} ERROR={jr['description']}"
+            )
         elif r.status_code != 200:
             raise Exception("Error communicating with the server")
         return jr
@@ -176,7 +197,9 @@ class CodStatusBot(object):
         The default bot_command handler. DO NOT REMOVE THIS
         """
         chat_id = update["message"]["chat"]["id"]
-        self._send_message(chat_id, "Don't know what you say. Take off the cock from your mouth")
+        self._send_message(
+            chat_id, "Don't know what you say. Take off the cock from your mouth"
+        )
 
     def __cmd_start(self, args: list, update: dict):
         """
@@ -186,9 +209,7 @@ class CodStatusBot(object):
         :param args: The args are gonna be ignored.
         """
         chat_id = update["message"]["chat"]["id"]
-        self._send_message(
-                chat_id,
-                "Hey there! I am the fucking bo(ss)t")
+        self._send_message(chat_id, "Hey there! I am the fucking bo(ss)t")
 
     def __cmd_cod_level(self, args: list, update: dict):
         """
@@ -208,24 +229,28 @@ class CodStatusBot(object):
         player_platform = args[1]
         self._send_message(chat_id, f"Getting information from player {player_name}...")
         try:
-            player_info = self.cod_stats.get_player_info(
-                    player_name, 
-                    player_platform
-            )
+            player_info = self.cod_stats.get_player_info(player_name, player_platform)
             player_level = player_info["data"]["level"]
             self._send_message(chat_id, f"{player_name} has the level {player_level}!")
         except Exception:
-            self._send_message(chat_id, f"Error getting info from the player {player_name}... :(")
+            self._send_message(
+                chat_id, f"Error getting info from the player {player_name}... :("
+            )
 
     def __cmd_help(self, args: list, update: dict):
-        feeds_cmds = "\n".join([f"- /activate_{fn_name} <yes|no>" for fn_name in self.bot_loop_fn])
+        feeds_cmds = "\n".join(
+            [f"- /activate_{fn_name} <yes|no>" for fn_name in self.bot_loop_fn]
+        )
         chat_id = update["message"]["chat"]["id"]
-        self._send_message(chat_id, f"List of commands for this noice bot\n"\
-                                    f"- /start\n"\
-                                    f"- /cod_level <user> <platform>\n"\
-                                    f"{feeds_cmds}")
+        self._send_message(
+            chat_id,
+            f"List of commands for this noice bot\n"
+            f"- /start\n"
+            f"- /cod_level <user> <platform>\n"
+            f"{feeds_cmds}",
+        )
 
-    def __metacmd_activate_loop(self, loop_feed_name, update):
+    def __metacmd_activate_loop(self, args, loop_feed_name, update):
         chat_id = update["message"]["chat"]["id"]
         if len(args) != 1:
             self._send_message(chat_id, f"Usage: /{loop_feed_name} [yes|no]")
@@ -235,7 +260,9 @@ class CodStatusBot(object):
             self._send_message(chat_id, f"Congrats! {loop_feed_name} activated")
         else:
             self.receive_feeds_in_chat_id[loop_feed_name] = None
-            self._send_message(chat_id, f"{loop_feed_name} has been deactivated successfully")
+            self._send_message(
+                chat_id, f"{loop_feed_name} has been deactivated successfully"
+            )
 
     def __loop_activity_feeds(self, last_time: int, chat_id: int) -> bool:
         """
@@ -249,8 +276,39 @@ class CodStatusBot(object):
         """
         if time.time() - last_time < 180:  # 3 minutes
             return False
-        feeds = self.cod_stats.get_feed(self._last_epoch)
-        for feed in feeds:
-            self._send_message(chat_id, f"New activity: {feed['username']} -> {feed['category']}")
-            self._last_epoch = feed["date"]
+        for feed in self.cod_stats.get_activity_feed(last_time):
+            self._send_message(
+                chat_id, f"New activity: {feed['username']} -> {feed['category']}"
+            )
+        return True
+
+    def __loop_scores_feeds(self, last_time: int, chat_id: int) -> bool:
+        """
+        Checks whether there is a new message in the scores activity feed. If yes,
+        it sends a new message to the chat with chat_id id
+
+        :param last_time: This is the last time the function was executed
+        :param chat_id: Is the chat_id of the chat where to send the messages
+
+        :return: False whether the execution was skiped, True otherwise
+        """
+        if int(time.time() * 1000) - last_time < 60000:  # 1 minutes
+            return False
+        # For there moment we do not have a way to specify from what users we want to receive
+        # the matches updates. The work that should be done here needs to be contemplated in the
+        # issue https://github.com/frantgn90/CodStatsBot/issues/8
+        matches = self.cod_stats.get_scores_feed(last_time, "frantgn", "psn")["matches"]
+        if matches is None:  # It does mean there are no matches
+            return False
+        for match in matches:
+            player_name = match["player"]["username"]
+            player_rank = match["playerStats"]["rank"]
+            player_xp = match["playerStats"]["totalXp"]
+            player_kills = match["playerStats"]["kills"]
+            player_deaths = match["playerStats"]["deaths"]
+            self._send_message(
+                chat_id,
+                f"Match has finnished\n"
+                f"[{player_name}]\n - XP:{player_xp}\n - Kills: {player_kills}\n - Deaths: {player_deaths}\n - Rank: {player_rank}",
+            )
         return True
