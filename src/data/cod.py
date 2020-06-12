@@ -1,9 +1,8 @@
-import requests
 import json
 import re
-import time
-
 from typing import List
+
+import requests
 
 
 class CodStats(object):
