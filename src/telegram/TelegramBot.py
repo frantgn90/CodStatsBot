@@ -1,6 +1,7 @@
 import json
 import time
 import requests
+import docstring_parser
 from typing import List
 
 
@@ -142,12 +143,18 @@ class TelegramBot(object):
         if "message" not in update:  # e.g. when there is an edit_message
             print("Ignoring update: Not message in update")
             return
+        if (
+                "new_chat_participant" in update["message"]
+                and update["message"]["new_chat_participant"]["username"] == "codstats2_bot"
+        ):
+            self._handle_added_to_chat(update["message"]["chat"]["id"], update)
+            return
         if "text" not in update["message"]:
             print("Ignoring update: not text in message")
             return
-        # Handle just plain text
-        if "entities" not in update["message"]:
-            print("Not entities in message. Handing as plain text")
+        # Handle just plain text all the text that does not contains a bot_command
+        if "entities" not in update["message"] or "bot_command" not in [entity["type"] for entity in update["message"]["entities"]]:
+            print("Not interesting entities in message. Handing as plain text")
             self._handle_text_message(update["message"]["text"], update)
             return
 
@@ -186,6 +193,31 @@ class TelegramBot(object):
             chat_id, "Don't know what you say. If you need help, type /help"
         )
 
+    def _cmd_help(self, args: list, update: dict):
+        """
+        This command shows all the available commands with its usages
+
+        :param args:
+        :param update: The handled telegram update
+        """
+        commands = "\n".join(
+            [f"- /{fn_name} {docstring_parser.parse(fn.__doc__).params[0].description} "
+             f"{docstring_parser.parse(fn.__doc__).short_description}"
+             for fn_name, fn in self.bot_command_fn.items() if fn_name != "default"]
+        )
+        feeds_commands = "\n".join(
+            [f"- /activate_{fn_name} <yes|no>" for fn_name in self.bot_loop_fn]
+        )
+
+        chat_id = update["message"]["chat"]["id"]
+        self._send_message(
+            chat_id,
+            f"List of commands\n"
+            f"{commands}\n\n"
+            f"Also to can activate/deactivate real-time activity information\n"
+            f"{feeds_commands}",
+        )
+
     def __metacmd_activate_feed(self, args: List[str], feed_name: str, update: dict):
         """
         This method handles the activation/deactivation of the feeds on a given chat
@@ -198,6 +230,7 @@ class TelegramBot(object):
         if len(args) != 1:
             self._send_message(chat_id, f"Usage: /{feed_name} [yes|no]")
             return
+        # TODO When a feed is activated/deactivated this information must be somehow saved
         if args[0] == "yes":
             self.receive_feeds_in_chat_id[feed_name] = chat_id
             self._send_message(chat_id, f"Congrats! {feed_name} activated")
@@ -214,4 +247,8 @@ class TelegramBot(object):
         :param message: The received message
         :param update:  The whole update object
         """
+        pass
+
+    def _handle_added_to_chat(self, chat_id: int, update: dict):
+        """This handler is gonna be called when the bot is added to a chat"""
         pass

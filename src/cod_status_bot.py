@@ -2,17 +2,15 @@ import time
 import urllib
 
 from src.data.cod import CodStats
-from src.model.accounts import Accounts
-from src.model.accounts import Account
+from src.model.accounts import AccountRepository, Account
 from src.telegram.TelegramBot import TelegramBot
 
 
 class CodStatusBot(TelegramBot):
     """
-    This class is devoted to manage the CodStatusBot. The manager will divert the proper input command to the
-    proper CodStatusBot instance. One instance per account
+    This class is devoted to manage the CodStatusBotAccounts. The manager will divert the proper input command to the
+    proper CodStatusBotAccount instance. One instance per account.
     """
-
     _update_offset = 0
 
     def __init__(self, telegram_bot_token: str):
@@ -24,7 +22,7 @@ class CodStatusBot(TelegramBot):
         super(CodStatusBot, self).__init__(telegram_bot_token)
 
         # Gets the list of accounts for the TelegramBot
-        self.accounts = Accounts()
+        self.accounts = AccountRepository()
 
         # Since it eagerly is loading the bots instances, depending on the updates, in order to be serving the
         #  real time feeds, this should be filled up with those accounts that have real-time feeds activated
@@ -40,8 +38,7 @@ class CodStatusBot(TelegramBot):
         Checks for updates every certain time set by `period_ms`.
 
         :param timeout_s: Seconds before the long polling timeout
-        :raise Exception: Whether there is a problem communicating with the
-         Telegram API
+        :raise Exception: Whether there is a problem communicating with the Telegram API
         """
         while True:
             response = self._call_endpoint(
@@ -52,32 +49,25 @@ class CodStatusBot(TelegramBot):
             )
             for update in response["result"]:
                 chat_id = update["message"]["chat"]["id"]
-                account = self.accounts.get_bot_account_from_chat_id(chat_id)
+                user_id = update["message"]["from"]["id"]
+                account = (self.accounts.get_bot_account_from_chat_id(chat_id)
+                           or self.accounts.get_bot_account_from_user_id(user_id)
+                           or Account.fake_account(chat_id, user_id))
+                bot = (CodStatusBotAccount(self.telegram_bot_token, account)
+                       if not account.fake_account else CodStatusBotSignUp(self.telegram_bot_token))
+
                 if account.account_id not in self.cod_status_bots:
-                    self.cod_status_bots.update(
-                        {
-                            account.account_id: CodStatusBotAccount(
-                                self.telegram_bot_token, account
-                            )
-                            if account.account_id is not None
-                            else CodStatusBotSignUp(self.telegram_bot_token)
-                        }
-                    )
-                cod_status_bot = self.cod_status_bots[account.account_id]
-                # When the process of signing up has been successful, the interaction is with an already logged in bot
-                if (
-                    isinstance(cod_status_bot, CodStatusBotSignUp)
-                    and cod_status_bot.new_account_created
-                ):
-                    # TODO if we are joining a new group to an account we might end up with two different instances
-                    #  of cod_status_bot for the same account!!!
-                    cod_status_bot = CodStatusBotAccount(
-                        self.telegram_bot_token, cod_status_bot.new_account
-                    )
-                    self.cod_status_bots[account.account_id] = cod_status_bot
-                cod_status_bot.process_update(update)
-                if update["update_id"] + 1 > self._update_offset:
-                    self._update_offset = update["update_id"] + 1
+                    self.cod_status_bots.update({account.account_id: bot})
+                self.cod_status_bots[account.account_id].process_update(update)
+
+                # This offset should be updated in order to not get the same updates again
+                self._update_offset = max(self._update_offset, update["update_id"] + 1)
+
+            # Sometimes we can free space, let's do it here. For example when a bot has been there for a long time
+            # without activity of the a sing up process is done
+            removable_account_ids = [account_id for account_id, bot in self.cod_status_bots.items() if bot.removable]
+            for account_id in removable_account_ids:
+                del self.cod_status_bots[account_id]
             self._process_feeds()
             time.sleep(timeout_s)
 
@@ -91,8 +81,9 @@ class CodStatusBotAccount(TelegramBot):
     This class is devoted to manage all te interactions with an specific chat
     TODO Some operations must be done at chat level, e.g. get the teammates level
     """
+    removable = False
 
-    def __init__(self, telegram_bot_token: str, account: object):
+    def __init__(self, telegram_bot_token: str, account: Account):
         """
         Initialize the account manager
 
@@ -107,8 +98,7 @@ class CodStatusBotAccount(TelegramBot):
 
     def _cmd_start(self, args: list, update: dict):
         """
-        Telegram is used to send `/start` whenever a bot is added into a group.
-        This bot command just shows up a funny welcome message.
+        This bot command just shows up startup welcome and instructions in case it is needed
 
         :param args: The args are gonna be ignored.
         :param update: The update information
@@ -127,12 +117,10 @@ class CodStatusBotAccount(TelegramBot):
 
     def _cmd_cod_level(self, args: list, update: dict):
         """
-        This bot command returns a message with the level information for a given player in a
+        Returns a message with the level information for a given player in a
         given platform.
 
-        :param args: It must be a two value list
-            - player: Is the player name
-            - platform: Is the platform from where we want to take the information
+        :param args: <player_name> <player_platform>
         """
 
         chat_id = update["message"]["chat"]["id"]
@@ -151,18 +139,49 @@ class CodStatusBotAccount(TelegramBot):
                 chat_id, f"Error getting info from the player {player_name}... :("
             )
 
-    def _cmd_help(self, args: list, update: dict):
-        feeds_cmds = "\n".join(
-            [f"- /activate_{fn_name} <yes|no>" for fn_name in self.bot_loop_fn]
-        )
+    def _cmd_add_friend(self, args: list, update: dict):
+        """
+        Adds a friend to the squad. Take into account only the friends in the squad are gonna be taken into account
+        on the real-time feeds updates
+
+        :param args: <player_name> <player_platform>
+        :param update:
+        """
         chat_id = update["message"]["chat"]["id"]
-        self._send_message(
-            chat_id,
-            f"List of commands for this noice bot\n"
-            f"- /start\n"
-            f"- /cod_level <user> <platform>\n"
-            f"{feeds_cmds}",
-        )
+        if len(args) != 2:
+            self._send_message(chat_id, "Usage: /add_friend <player_name> <player_platform>")
+            return
+        player_name = urllib.parse.quote(args[0])
+        player_platform = args[1]
+        self._send_message(chat_id, f"Adding {player_name} to the squad... "
+                                    f"Take into account that this user must be added as friend on the COD platform")
+        try:
+            self.account.add_player_to_group(chat_id, player_name, player_platform)
+            self._send_message(chat_id, f"{player_name} has been added successfully!")
+        except Exception:
+            self._send_message(
+                chat_id, f"Error adding {player_name} to the squad... :("
+            )
+
+    def _cmd_show_squad(self, args: list, update:dict):
+        """
+        Show information about the squad components
+        :param args: All arguments are gonna be ignored
+        :param update: The update object
+        """
+        chat_id = update["message"]["chat"]["id"]
+        message = ""
+        for cod_friend in self.account.get_cod_friends(chat_id):
+            try:
+                player_info = self.cod_stats.get_player_info(cod_friend.cod_player_name, cod_friend.cod_player_platform)
+                player_level = player_info["data"]["level"]
+                br_wins = player_info["data"]["lifetime"]["mode"]["br"]["properties"]["wins"]
+                message += f"[{cod_friend.cod_player_name.replace('%23', '#')}] has the level [{player_level}] and BR wins [{br_wins}]\n"
+            except Exception:
+                self._send_message(
+                    chat_id, f"Error getting info from the player {cod_friend.cod_player_name}... :("
+                )
+        self._send_message(chat_id, message)
 
     def _loop_activity_feeds(self, last_time: int, chat_id: str) -> bool:
         """
@@ -194,22 +213,53 @@ class CodStatusBotAccount(TelegramBot):
         """
         if int(time.time() * 1000) - last_time < 60000:  # 1 minutes
             return False
-        matches = self.cod_stats.get_scores_feed(
-            last_time, self.account.cod_user, self.account.cod_platform
-        )["matches"]
-        if matches is None:  # It does mean there are no matches
-            return False
-        for match in matches:
-            player_name = match["player"]["username"]
-            player_xp = match["playerStats"]["totalXp"]
-            player_kills = match["playerStats"]["kills"]
-            player_deaths = match["playerStats"]["deaths"]
-            self._send_message(
-                chat_id,
-                f"Match has finnished\n"
-                f"[{player_name}]\n - XP:{player_xp}\n - Kills: {player_kills}\n - Deaths: {player_deaths}",
-            )
+        for cod_friend in self.account.get_cod_friends(chat_id):
+            feed_info = self.cod_stats.get_scores_feed(last_time, cod_friend.cod_player_name,
+                                                       cod_friend.cod_player_platform)
+            matches = feed_info["matches"]
+            if matches is None:
+                return False
+            for match in matches:
+                player_name = match["player"]["username"]
+                player_xp = match["playerStats"]["totalXp"]
+                player_kills = match["playerStats"]["kills"]
+                player_deaths = match["playerStats"]["deaths"]
+                self._send_message(
+                    chat_id,
+                    f"Match has finnished\n"
+                        f"[{player_name}]\n - XP:{player_xp}\n - Kills: {player_kills}\n - Deaths: {player_deaths}",
+                )
         return True
+
+    def _handle_added_to_chat(self, chat_id: str, update: dict):
+        """
+        When the bot is added to a chat by a telegram user that already have an account, this chat is added
+        as a new group where to publish for this account
+        """
+        if update["message"]["chat"]["type"] == "group":
+            owner_name = update["message"]["from"]["username"]
+            self._send_message(chat_id, "Hi guys! I am the CodStatusBot. I am gonna be pushing updates about the squad")
+            self._send_message(chat_id, f"Please thanks to @{owner_name} for create the account")
+            self._send_message(chat_id, "We are gonna use his/her COD account for retrieving the data")
+            try:
+                self.account.create_telegram_group(chat_id)
+            except Exception as e:
+                print(f"Something went wrong creating a new group. {e}")
+
+
+class CodStatusBotNewChat(TelegramBot):
+    def __init__(self, telegram_bot_token: str, account: Account):
+        """
+        Initialize the account manager
+
+        :param account: The bot account
+        """
+        super().__init__(telegram_bot_token)
+        self.account = account
+
+        # Sign in in the COD platform
+        self.cod_user, self.cod_password = account.cod_user, account.cod_password
+        self.cod_stats = CodStats(self.cod_user, self.cod_password)
 
 
 class CodStatusBotSignUp(TelegramBot):
@@ -217,20 +267,20 @@ class CodStatusBotSignUp(TelegramBot):
     This class is devoted to manage the sign up process in an specific chat
     """
 
+    removable = False
     _waiting_for_the_user_name = False
     _waiting_for_the_user_password = False
-    new_account_created = False
 
     def __init__(self, telegram_bot_token: str):
         """
         Initialize the account manager
         """
+        self.account_repository = AccountRepository()
         super().__init__(telegram_bot_token)
 
     def _cmd_start(self, args: list, update: dict):
         """
-        Telegram is used to send `/start` whenever a bot is added into a group.
-        This bot command just shows up a funny welcome message.
+        This bot command just shows up startup welcome and instructions in case it is needed
 
         :param args: The args are gonna be ignored.
         """
@@ -242,19 +292,16 @@ class CodStatusBotSignUp(TelegramBot):
         self._send_message(
             chat_id,
             "Hey there! It seems you do not have an account.\n"
-            "Please provide your token using /cod_token <private-token>"
-            "If you do not have a token yet, follow the instructions below:\n"
+            "Follow the instructions below:\n"
             "  1. Start a private conversation (if this is not a group you are done)\n"
             "  2. Call the command /new_account\n"
-            "  3. Follow the steps to get your access token",
         )
 
     def _cmd_new_account(self, args: list, update: dict):
         """
-        The new account command. This is the very entry point for the bot. This is gonna guide the user in order to
-        obtain its private token
+        This command is for creating a new account. It will guide for the sign up process
 
-        :param args: The arguments for this command
+        :param args:
         :param update: The whole update object
         """
         chat_id = update["message"]["chat"]["id"]
@@ -274,25 +321,14 @@ class CodStatusBotSignUp(TelegramBot):
         )
         self._send_message(
             chat_id,
-            "After that you are gonna receive a secret access token. With this access token"
-            " you will be able to go to a group of friends and tell me to show the information there",
+            "After that you are gonna you will be able to go to a group of friends and tell me to show the information"
+            " there",
         )
         self._send_message(
             chat_id,
             "If you agree, please tell me your Call of Duty profile webpage user",
         )
         self._waiting_for_the_user_name = True
-
-    def _cmd_cod_token(self, args: list, update: dict):
-        self.new_account = Account.get_account_by_token(args[0])
-        chat_id = update["message"]["chat"]["id"]
-
-        if self.new_account is not None:
-            # TODO Add new group to the account
-            # TODO Generate new private token and sent it to the user private chat
-            self._send_message(chat_id, "You logged in successfully")
-        else:
-            self._send_message(chat_id, "There might be a problem with your token. Check you it is correct")
 
     def _handle_text_message(self, message: str, update: dict):
         """
@@ -311,37 +347,25 @@ class CodStatusBotSignUp(TelegramBot):
             temporal_cod_user_password = message
             self._waiting_for_the_user_password = False
             try:
-                self.new_account = Account.new_account(
-                    self._temporal_cod_user_name, temporal_cod_user_password, chat_id
+                telegram_user_id = update["message"]["from"]["id"]
+                new_account = self.account_repository.create(
+                    self._temporal_cod_user_name, temporal_cod_user_password, chat_id, telegram_user_id
                 )
-            except Exception as e:
-                self._send_message(
-                    chat_id,
-                    "Oh no! There might be some error processing your request :_(",
-                )
-            else:
                 self._send_message(
                     chat_id, "Your account has been successfully created!"
-                )
-                self._send_message(
-                    chat_id, f"Your secret token is: {self.new_account.secret_token}"
                 )
                 self._send_message(
                     chat_id, "Congrats! From now on, you can use all the features!"
                 )
                 self._send_message(
                     chat_id,
-                    "The token we provided should be used to invite me to your group of"
-                    " teammates. Once you add me to the group, use the command /cod_token <token>",
-                )
-                self._send_message(
-                    chat_id,
-                    "Every time you use the token, a new one is gonna be generated for"
-                    " security purposes and sent to you in this chat.",
-                )
-                self._send_message(
-                    chat_id,
                     "Also you can chat with me here, so tell me :) What do you want? "
                     "Type /help for a list of commands",
                 )
-                self.new_account_created = True
+                self.removable = True
+            except Exception as e:
+                self._send_message(
+                    chat_id,
+                    "Oh no! There might be some error processing your request :_(",
+                )
+                print(e)

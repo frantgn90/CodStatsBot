@@ -86,7 +86,7 @@ class CodStats(object):
         # TODO Check out whether the token named `atkn` exists in self.session.cookies
         # to have knowledge of whether the login has been successfully or not
 
-        if r.status_code != 200:
-            raise Exception(f"Error logging to the COD platform: {r.text}")
+        if r.status_code != 200 or not "atkn" in self.session.cookies:
+            raise Exception(f"Error logging to the COD platform. The atkn cookie is not present")
         else:
             print("Successfully logged in into COD platform")
